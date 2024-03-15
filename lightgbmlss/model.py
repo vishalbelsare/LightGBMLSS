@@ -9,6 +9,9 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Tuple, Union
 
 
 import lightgbm as lgb
+from lightgbmlss.distributions.distribution_utils import DistributionClass
+from lightgbmlss.logger import CustomLogger
+lgb.register_logger(CustomLogger())
 from lightgbmlss.utils import *
 import optuna
 from optuna.samplers import TPESampler
@@ -59,16 +62,9 @@ class LightGBMLSS:
      start_values : np.ndarray
         Starting values for each distributional parameter.
     """
-    def __init__(self, dist):
+    def __init__(self, dist: DistributionClass):
         self.dist = dist             # Distribution object
         self.start_values = None     # Starting values for distributional parameters
-
-    def __getstate__(self):
-        state = self.__dict__.copy()  # Copy the object's state
-        return state
-
-    def __setstate__(self, state):
-        self.__dict__.update(state)  # Restore the object's state
 
     def set_params(self, params: Dict[str, Any]) -> Dict[str, Any]:
         """
@@ -86,9 +82,10 @@ class LightGBMLSS:
         """
         params_adj = {"num_class": self.dist.n_dist_param,
                       "metric": "None",
-                      "objective": "None",
+                      "objective": self.dist.objective_fn,
                       "random_seed": 123,
-                      "verbose": -1}
+                      "verbose": -1
+                      }
         params.update(params_adj)
 
         return params
@@ -173,12 +170,11 @@ class LightGBMLSS:
         self.set_init_score(train_set)
 
         if valid_sets is not None:
-            valid_sets = self.set_valid_margin(valid_sets, self.start_values)
+            valid_sets = self.set_valid_margin(valid_sets)
 
         self.booster = lgb.train(params,
                                  train_set,
                                  num_boost_round=num_boost_round,
-                                 fobj=self.dist.objective_fn,
                                  feval=self.dist.metric_fn,
                                  valid_sets=valid_sets,
                                  valid_names=valid_names,
@@ -272,7 +268,6 @@ class LightGBMLSS:
 
         self.bstLSS_cv = lgb.cv(params,
                                 train_set,
-                                fobj=self.dist.objective_fn,
                                 feval=self.dist.metric_fn,
                                 num_boost_round=num_boost_round,
                                 folds=folds,
@@ -398,11 +393,11 @@ class LightGBMLSS:
                                           )
 
             # Extract the optimal number of boosting rounds
-            opt_rounds = np.argmin(np.array(lgblss_param_tuning[f"{self.dist.loss_fn}-mean"])) + 1
+            opt_rounds = np.argmin(np.array(lgblss_param_tuning[f"valid {self.dist.loss_fn}-mean"])) + 1
             trial.set_user_attr("opt_round", int(opt_rounds))
 
             # Extract the best score
-            best_score = np.min(np.array(lgblss_param_tuning[f"{self.dist.loss_fn}-mean"]))
+            best_score = np.min(np.array(lgblss_param_tuning[f"valid {self.dist.loss_fn}-mean"]))
 
             return best_score
 
@@ -439,7 +434,7 @@ class LightGBMLSS:
         return opt_param.params
 
     def predict(self,
-                test_set: pd.DataFrame,
+                data: pd.DataFrame,
                 pred_type: str = "parameters",
                 n_samples: int = 1000,
                 quantiles: list = [0.1, 0.5, 0.9],
@@ -449,12 +444,12 @@ class LightGBMLSS:
 
         Arguments
         ---------
-        test_set : pd.DataFrame
-            Test data.
+        data : pd.DataFrame
+            Data to predict from.
         pred_type : str
             Type of prediction:
             - "samples" draws n_samples from the predicted distribution.
-            - "quantile" calculates the quantiles from the predicted distribution.
+            - "quantiles" calculates the quantiles from the predicted distribution.
             - "parameters" returns the predicted distributional parameters.
             - "expectiles" returns the predicted expectiles.
         n_samples : int
@@ -472,7 +467,7 @@ class LightGBMLSS:
 
         # Predict
         predt_df = self.dist.predict_dist(booster=self.booster,
-                                          test_set=test_set,
+                                          data=data,
                                           start_values=self.start_values,
                                           pred_type=pred_type,
                                           n_samples=n_samples,
@@ -509,7 +504,7 @@ class LightGBMLSS:
         explainer = shap.TreeExplainer(self.booster)
         shap_values = explainer(X)
 
-        param_pos = list(self.dist.param_dict.keys()).index(parameter)
+        param_pos = self.dist.distribution_arg_names.index(parameter)
 
         if plot_type == "Partial_Dependence":
             if self.dist.n_dist_param == 1:
@@ -556,7 +551,6 @@ class LightGBMLSS:
 
     def set_valid_margin(self,
                          valid_sets: list,
-                         start_values: np.ndarray
                          ) -> list:
         """
         Function that sets the base margin for the validation set.
@@ -564,26 +558,15 @@ class LightGBMLSS:
         Arguments
         ---------
         valid_sets : list
-            List of tuples containing the train and evaluation set.
-        valid_names: list
-            List of tuples containing the name of train and evaluation set.
-        start_values : np.ndarray
-            Array containing the start values for the distributional parameters.
+            List of tuples containing the evaluation set(s).
 
         Returns
         -------
         valid_sets : list
-            List of tuples containing the train and evaluation set.
+            List of tuples containing the evaluation set(s).
         """
-        valid_sets1 = valid_sets[0]
-        init_score_val1 = (np.ones(shape=(valid_sets1.get_label().shape[0], 1))) * start_values
-        valid_sets1.set_init_score(init_score_val1.ravel(order="F"))
-
-        valid_sets2 = valid_sets[1]
-        init_score_val2 = (np.ones(shape=(valid_sets2.get_label().shape[0], 1))) * start_values
-        valid_sets2.set_init_score(init_score_val2.ravel(order="F"))
-
-        valid_sets = [valid_sets1, valid_sets2]
+        for valid_set in valid_sets:
+            self.set_init_score(valid_set)
 
         return valid_sets
 

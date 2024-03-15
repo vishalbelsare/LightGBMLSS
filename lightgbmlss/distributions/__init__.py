@@ -1,7 +1,9 @@
 """LightGBMLSS - An extension of LightGBM to probabilistic forecasting"""
 
 from . import distribution_utils
+from . import flow_utils
 from . import zero_inflated
+from . import mixture_distribution_utils
 from . import Gaussian
 from . import StudentT
 from . import Gamma
@@ -19,3 +21,5 @@ from . import ZINB
 from . import ZAGamma
 from . import ZABeta
 from . import ZALN
+from . import SplineFlow
+from . import Mixture

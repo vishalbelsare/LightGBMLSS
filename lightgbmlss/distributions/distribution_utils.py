@@ -9,7 +9,8 @@ import pandas as pd
 from tqdm import tqdm
 
 from typing import Any, Dict, Optional, List, Tuple
-from plotnine import *
+import matplotlib.pyplot as plt
+import seaborn as sns
 import warnings
 
 
@@ -126,6 +127,7 @@ class DistributionClass:
         """
         # Target
         target = torch.tensor(data.get_label().reshape(-1, 1))
+        n_obs = target.shape[0]
 
         # Start values (needed to replace NaNs in predt)
         start_values = data.get_init_score().reshape(-1, self.n_dist_param)[0, :].tolist()
@@ -134,7 +136,7 @@ class DistributionClass:
         is_higher_better = False
         _, loss = self.get_params_loss(predt, target, start_values, requires_grad=False)
 
-        return self.loss_fn, loss, is_higher_better
+        return self.loss_fn, loss / n_obs, is_higher_better
 
     def loss_fn_start_values(self,
                              params: torch.Tensor,
@@ -196,7 +198,7 @@ class DistributionClass:
             Starting values for each distributional parameter.
         """
         # Convert target to torch.tensor
-        target = torch.tensor(target, dtype=torch.float32)
+        target = torch.tensor(target).reshape(-1, 1)
 
         # Initialize parameters
         params = [torch.tensor(0.5, requires_grad=True) for _ in range(self.n_dist_param)]
@@ -237,7 +239,7 @@ class DistributionClass:
                         target: torch.Tensor,
                         start_values: List[float],
                         requires_grad: bool = False,
-                        ) -> Tuple[np.ndarray, np.ndarray]:
+                        ) -> Tuple[List[torch.Tensor], np.ndarray]:
         """
         Function that returns the predicted parameters and the loss.
 
@@ -336,7 +338,7 @@ class DistributionClass:
 
     def predict_dist(self,
                      booster: lgb.Booster,
-                     test_set: pd.DataFrame,
+                     data: pd.DataFrame,
                      start_values: np.ndarray,
                      pred_type: str = "parameters",
                      n_samples: int = 1000,
@@ -350,14 +352,14 @@ class DistributionClass:
         ---------
         booster : lgb.Booster
             Trained model.
-        test_set : pd.DataFrame
-            Test data.
+        data : pd.DataFrame
+            Data to predict from.
         start_values : np.ndarray.
             Starting values for each distributional parameter.
         pred_type : str
             Type of prediction:
             - "samples" draws n_samples from the predicted distribution.
-            - "quantile" calculates the quantiles from the predicted distribution.
+            - "quantiles" calculates the quantiles from the predicted distribution.
             - "parameters" returns the predicted distributional parameters.
             - "expectiles" returns the predicted expectiles.
         n_samples : int
@@ -374,13 +376,13 @@ class DistributionClass:
         """
 
         predt = torch.tensor(
-            booster.predict(test_set, raw_score=True),
+            booster.predict(data, raw_score=True),
             dtype=torch.float32
         ).reshape(-1, self.n_dist_param)
 
         # Set init_score as starting point for each distributional parameter.
         init_score_pred = torch.tensor(
-            np.ones(shape=(test_set.shape[0], 1))*start_values,
+            np.ones(shape=(data.shape[0], 1))*start_values,
             dtype=torch.float32
         )
 
@@ -647,11 +649,11 @@ class DistributionClass:
                          }
                     )
                 dist_list.append(fit_df)
-                fit_df = pd.concat(dist_list).sort_values(by=self.loss_fn, ascending=True)
-                fit_df["rank"] = fit_df[self.loss_fn].rank().astype(int)
-                fit_df.set_index(fit_df["rank"], inplace=True)
                 pbar.update(1)
             pbar.set_description(f"Fitting of candidate distributions completed")
+            fit_df = pd.concat(dist_list).sort_values(by=self.loss_fn, ascending=True)
+            fit_df["rank"] = fit_df[self.loss_fn].rank().astype(int)
+            fit_df.set_index(fit_df["rank"], inplace=True)
 
         if plot:
             # Select best distribution
@@ -672,29 +674,19 @@ class DistributionClass:
                 axis=1,
             )
             fitted_params = pd.DataFrame(fitted_params, columns=best_dist_sel.param_dict.keys())
-            fitted_params.columns = best_dist_sel.param_dict.keys()
+            n_samples = np.max([10000, target.shape[0]])
+            n_samples = np.where(n_samples > 500000, 100000, n_samples)
             dist_samples = best_dist_sel.draw_samples(fitted_params,
-                                                      n_samples=1000,
+                                                      n_samples=n_samples,
                                                       seed=123).values
 
             # Plot actual and fitted distribution
-            plot_df_actual = pd.DataFrame({"y": target.reshape(-1,), "type": "Actual"})
-            plot_df_fitted = pd.DataFrame({"y": dist_samples.reshape(-1,),
-                                           "type": f"Best-Fit: {best_dist['distribution'].values[0]}"})
-            plot_df = pd.concat([plot_df_actual, plot_df_fitted])
-
-            print(
-                ggplot(plot_df,
-                       aes(x="y",
-                           color="type")) +
-                geom_density(alpha=0.5) +
-                theme_bw(base_size=15) +
-                theme(figure_size=figure_size,
-                      legend_position="right",
-                      legend_title=element_blank(),
-                      plot_title=element_text(hjust=0.5)) +
-                labs(title=f"Actual vs. Fitted Density")
-            )
+            plt.figure(figsize=figure_size)
+            sns.kdeplot(target.reshape(-1, ), label="Actual")
+            sns.kdeplot(dist_samples.reshape(-1, ), label=f"Best-Fit: {best_dist['distribution'].values[0]}")
+            plt.legend()
+            plt.title("Actual vs. Best-Fit Density", fontweight="bold", fontsize=16)
+            plt.show()
 
         fit_df.drop(columns=["rank", "params"], inplace=True)
 
